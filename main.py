@@ -3,6 +3,7 @@ import base64
 import json
 import re
 import tkinter as tk
+import time
 from pathlib import Path
 from tkinter import messagebox, ttk
 from urllib import error, request
@@ -14,10 +15,12 @@ BASE_DIR = Path(__file__).resolve().parent
 CASCADE_PATH = BASE_DIR / "face_ref.xml"
 KNOWN_FACES_DIR = BASE_DIR / "known_faces"
 DEFAULT_API_URL = "http://127.0.0.1:8000/api/customers/register-face"
+DEFAULT_DETECTION_API_URL = "http://127.0.0.1:8000/api/customers/detect-member"
 
 face_ref = cv2.CascadeClassifier(str(CASCADE_PATH))
 orb = cv2.ORB_create(nfeatures=700)
 matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+LAST_MEMBER_NOTIFICATION = {"label": None, "sent_at": 0.0}
 
 
 def slugify(value):
@@ -117,6 +120,29 @@ def post_json(url, payload):
         raise RuntimeError(f"Laravel API error {exc.code}: {detail}") from exc
     except error.URLError as exc:
         raise RuntimeError(f"Tidak bisa terhubung ke Laravel API: {exc.reason}") from exc
+
+
+def notify_member_detected(face_label, score, api_url=DEFAULT_DETECTION_API_URL):
+    global LAST_MEMBER_NOTIFICATION
+
+    now = time.time()
+    same_label = LAST_MEMBER_NOTIFICATION["label"] == face_label
+    sent_recently = now - LAST_MEMBER_NOTIFICATION["sent_at"] < 15
+
+    if same_label and sent_recently:
+        return
+
+    try:
+        post_json(
+            api_url,
+            {
+                "face_label": face_label,
+                "score": int(score),
+            },
+        )
+        LAST_MEMBER_NOTIFICATION = {"label": face_label, "sent_at": now}
+    except RuntimeError as exc:
+        print(f"Gagal kirim notif member ke Laravel: {exc}")
 
 
 def find_largest_face(faces):
@@ -229,6 +255,9 @@ def run_recognition():
                 color,
                 2,
             )
+
+            if label != "Unknown":
+                notify_member_detected(label, score)
 
         if not KNOWN_FACES:
             cv2.putText(
