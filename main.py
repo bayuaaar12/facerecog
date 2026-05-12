@@ -16,12 +16,18 @@ CASCADE_PATH = BASE_DIR / "face_ref.xml"
 KNOWN_FACES_DIR = BASE_DIR / "known_faces"
 DEFAULT_API_URL = "http://127.0.0.1:8000/api/customers/register-face"
 DEFAULT_DETECTION_API_URL = "http://127.0.0.1:8000/api/customers/detect-member"
-COLOR_BLUE = (255, 122, 0)
-COLOR_BLUE_SOFT = (255, 244, 232)
-COLOR_TEXT = (32, 33, 36)
-COLOR_MUTED = (120, 120, 128)
-COLOR_BORDER = (225, 229, 235)
-COLOR_BG = (250, 250, 252)
+COLOR_PRIMARY = (238, 112, 35)
+COLOR_PRIMARY_SOFT = (255, 241, 229)
+COLOR_ACCENT = (75, 167, 88)
+COLOR_ACCENT_SOFT = (226, 247, 231)
+COLOR_TEXT = (28, 31, 36)
+COLOR_MUTED = (116, 124, 138)
+COLOR_BORDER = (220, 226, 235)
+COLOR_BG = (246, 248, 251)
+COLOR_PANEL = (255, 255, 255)
+COLOR_SURFACE = (236, 240, 246)
+COLOR_BLUE = COLOR_PRIMARY
+COLOR_BLUE_SOFT = COLOR_PRIMARY_SOFT
 
 face_ref = cv2.CascadeClassifier(str(CASCADE_PATH))
 orb = cv2.ORB_create(nfeatures=400)
@@ -219,16 +225,16 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
             "label": "Capture",
             "value": "capture",
             "rect": (350, 505, 485, 555),
-            "color": COLOR_BLUE,
-            "border": COLOR_BLUE,
+            "color": COLOR_PRIMARY,
+            "border": COLOR_PRIMARY,
             "text_color": (255, 255, 255),
         },
         {
             "label": "Balik",
             "value": "back",
             "rect": (500, 505, 620, 555),
-            "border": COLOR_BLUE,
-            "text_color": COLOR_BLUE,
+            "border": COLOR_BORDER,
+            "text_color": COLOR_MUTED,
         },
     ]
 
@@ -262,26 +268,30 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
             cv2.BORDER_CONSTANT,
             value=COLOR_BG,
         )
+        draw_round_rect(frame, (14, 492, 626, 568), COLOR_PANEL, 18, -1, COLOR_BORDER)
+        chip_color = COLOR_ACCENT if len(faces) else COLOR_MUTED
+        chip_soft = COLOR_ACCENT_SOFT if len(faces) else COLOR_SURFACE
+        draw_status_chip(frame, f"{len(faces)} wajah terdeteksi", (22, 524, 208, 560), chip_color, chip_soft)
 
         for x, y, w, h in faces:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), COLOR_BLUE, 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), COLOR_PRIMARY, 2)
 
         cv2.putText(
             frame,
             "Register Wajah",
-            (22, 510),
+            (22, 516),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.72,
+            0.6,
             COLOR_TEXT,
             2,
             cv2.LINE_AA,
         )
         cv2.putText(
             frame,
-            f"{name} | Diskon {discount_percent}% | Wajah: {len(faces)}",
-            (22, 540),
+            f"{name} | Diskon {discount_percent}%",
+            (225, 548),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            0.46,
             COLOR_MUTED,
             1,
             cv2.LINE_AA,
@@ -345,8 +355,8 @@ def run_recognition(camera_index=0):
             "label": "Balik",
             "value": "back",
             "rect": (510, 505, 620, 555),
-            "border": COLOR_BLUE,
-            "text_color": COLOR_BLUE,
+            "border": COLOR_BORDER,
+            "text_color": COLOR_MUTED,
         },
     ]
 
@@ -406,10 +416,12 @@ def run_recognition(camera_index=0):
         )
 
         if not KNOWN_FACES:
+            draw_round_rect(frame, (14, 492, 626, 568), COLOR_PANEL, 18, -1, COLOR_BORDER)
+            draw_status_chip(frame, "Belum ada data", (22, 524, 170, 560), COLOR_MUTED, COLOR_SURFACE)
             cv2.putText(
                 frame,
                 "Folder known_faces masih kosong",
-                (22, 520),
+                (22, 516),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
                 COLOR_MUTED,
@@ -417,22 +429,29 @@ def run_recognition(camera_index=0):
                 cv2.LINE_AA,
             )
         else:
+            known_label = f"{len(KNOWN_FACES)} wajah terdaftar"
+            recognized_count = sum(1 for item in detections if item[4] != "Unknown")
+            status_text = "Member dikenali" if recognized_count else "Scanning aktif"
+            status_color = COLOR_ACCENT if recognized_count else COLOR_PRIMARY
+            status_soft = COLOR_ACCENT_SOFT if recognized_count else COLOR_PRIMARY_SOFT
+            draw_round_rect(frame, (14, 492, 626, 568), COLOR_PANEL, 18, -1, COLOR_BORDER)
+            draw_status_chip(frame, status_text, (22, 524, 182, 560), status_color, status_soft)
             cv2.putText(
                 frame,
                 "Face Recognition",
-                (22, 520),
+                (22, 516),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.72,
+                0.6,
                 COLOR_TEXT,
                 2,
                 cv2.LINE_AA,
             )
             cv2.putText(
                 frame,
-                f"Wajah terdaftar: {len(KNOWN_FACES)}",
-                (22, 548),
+                known_label,
+                (205, 548),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.46,
                 COLOR_MUTED,
                 1,
                 cv2.LINE_AA,
@@ -494,21 +513,61 @@ def draw_centered_text(canvas, text, center, font_scale, color, thickness=2):
     cv2.putText(canvas, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
 
 
+def draw_round_rect(canvas, rect, color, radius=14, thickness=-1, border_color=None):
+    x1, y1, x2, y2 = rect
+    radius = max(0, min(radius, (x2 - x1) // 2, (y2 - y1) // 2))
+
+    if thickness < 0:
+        cv2.rectangle(canvas, (x1 + radius, y1), (x2 - radius, y2), color, -1)
+        cv2.rectangle(canvas, (x1, y1 + radius), (x2, y2 - radius), color, -1)
+        cv2.circle(canvas, (x1 + radius, y1 + radius), radius, color, -1)
+        cv2.circle(canvas, (x2 - radius, y1 + radius), radius, color, -1)
+        cv2.circle(canvas, (x1 + radius, y2 - radius), radius, color, -1)
+        cv2.circle(canvas, (x2 - radius, y2 - radius), radius, color, -1)
+        if border_color:
+            draw_round_rect(canvas, rect, border_color, radius, 1)
+        return
+
+    cv2.line(canvas, (x1 + radius, y1), (x2 - radius, y1), color, thickness, cv2.LINE_AA)
+    cv2.line(canvas, (x1 + radius, y2), (x2 - radius, y2), color, thickness, cv2.LINE_AA)
+    cv2.line(canvas, (x1, y1 + radius), (x1, y2 - radius), color, thickness, cv2.LINE_AA)
+    cv2.line(canvas, (x2, y1 + radius), (x2, y2 - radius), color, thickness, cv2.LINE_AA)
+    cv2.ellipse(canvas, (x1 + radius, y1 + radius), (radius, radius), 180, 0, 90, color, thickness, cv2.LINE_AA)
+    cv2.ellipse(canvas, (x2 - radius, y1 + radius), (radius, radius), 270, 0, 90, color, thickness, cv2.LINE_AA)
+    cv2.ellipse(canvas, (x2 - radius, y2 - radius), (radius, radius), 0, 0, 90, color, thickness, cv2.LINE_AA)
+    cv2.ellipse(canvas, (x1 + radius, y2 - radius), (radius, radius), 90, 0, 90, color, thickness, cv2.LINE_AA)
+
+
+def draw_header(canvas, title, subtitle, width):
+    draw_round_rect(canvas, (18, 18, width - 18, 112), COLOR_PANEL, 18, -1, COLOR_BORDER)
+    draw_round_rect(canvas, (36, 42, 76, 82), COLOR_PRIMARY_SOFT, 12, -1)
+    cv2.circle(canvas, (56, 62), 11, COLOR_PRIMARY, -1, cv2.LINE_AA)
+    cv2.circle(canvas, (56, 62), 4, COLOR_PANEL, -1, cv2.LINE_AA)
+    cv2.putText(canvas, title, (94, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.78, COLOR_TEXT, 2, cv2.LINE_AA)
+    cv2.putText(canvas, subtitle, (94, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.46, COLOR_MUTED, 1, cv2.LINE_AA)
+
+
+def draw_status_chip(canvas, text, rect, color, soft_color):
+    draw_round_rect(canvas, rect, soft_color, 12, -1)
+    x1, y1, _x2, _y2 = rect
+    cv2.circle(canvas, (x1 + 18, y1 + 18), 5, color, -1, cv2.LINE_AA)
+    cv2.putText(canvas, text, (x1 + 32, y1 + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.43, color, 1, cv2.LINE_AA)
+
+
 def draw_menu_button(canvas, button):
     x1, y1, x2, y2 = button["rect"]
-    color = button.get("color", (255, 255, 255))
+    color = button.get("color", COLOR_PANEL)
     border = button.get("border", COLOR_BORDER)
-    text_color = button.get("text_color", COLOR_BLUE)
+    text_color = button.get("text_color", COLOR_PRIMARY)
 
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), color, -1)
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), border, 1)
+    draw_round_rect(canvas, (x1, y1, x2, y2), color, 15, -1, border)
     draw_centered_text(
         canvas,
         button["label"],
         ((x1 + x2) // 2, (y1 + y2) // 2),
-        0.62,
+        button.get("font_scale", 0.58),
         text_color,
-        1,
+        button.get("thickness", 1),
     )
 
 
@@ -530,7 +589,7 @@ def field_at_position(fields, x, y):
 
 def draw_input_field(canvas, field, value, active=False):
     x1, y1, x2, y2 = field["rect"]
-    border = COLOR_BLUE if active else COLOR_BORDER
+    border = COLOR_PRIMARY if active else COLOR_BORDER
 
     cv2.putText(
         canvas,
@@ -542,8 +601,7 @@ def draw_input_field(canvas, field, value, active=False):
         1,
         cv2.LINE_AA,
     )
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 255, 255), -1)
-    cv2.rectangle(canvas, (x1, y1), (x2, y2), border, 1)
+    draw_round_rect(canvas, (x1, y1, x2, y2), COLOR_PANEL, 13, -1, border)
 
     display_value = value if value else field["placeholder"]
     text_color = COLOR_TEXT if value else (170, 170, 176)
@@ -555,7 +613,7 @@ def draw_input_field(canvas, field, value, active=False):
         display_value[:34],
         (x1 + 14, y1 + 35),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
+        0.54,
         text_color,
         1,
         cv2.LINE_AA,
@@ -577,36 +635,36 @@ def show_register_form(default_discount=0):
             "key": "name",
             "label": "Nama customer",
             "placeholder": "Contoh: Budi",
-            "rect": (120, 145, 600, 198),
+            "rect": (120, 205, 600, 258),
         },
         {
             "key": "phone",
             "label": "No. telepon",
             "placeholder": "Opsional",
-            "rect": (120, 225, 600, 278),
+            "rect": (120, 285, 600, 338),
         },
         {
             "key": "discount",
             "label": "Diskon (%)",
             "placeholder": "0",
-            "rect": (120, 305, 600, 358),
+            "rect": (120, 365, 600, 418),
         },
     ]
     buttons = [
         {
-            "label": "Mulai Register",
+            "label": "Mulai register",
             "value": "start",
-            "rect": (120, 390, 420, 445),
-            "color": COLOR_BLUE,
-            "border": COLOR_BLUE,
+            "rect": (120, 455, 420, 510),
+            "color": COLOR_PRIMARY,
+            "border": COLOR_PRIMARY,
             "text_color": (255, 255, 255),
         },
         {
             "label": "Balik",
             "value": "back",
-            "rect": (440, 390, 600, 445),
-            "border": COLOR_BLUE,
-            "text_color": COLOR_BLUE,
+            "rect": (440, 455, 600, 510),
+            "border": COLOR_BORDER,
+            "text_color": COLOR_MUTED,
         },
     ]
 
@@ -629,22 +687,14 @@ def show_register_form(default_discount=0):
             selected["value"] = "back"
             break
 
-        canvas = np.full((475, 720, 3), COLOR_BG, dtype=np.uint8)
-        cv2.rectangle(canvas, (0, 0), (720, 105), COLOR_BLUE_SOFT, -1)
-        cv2.putText(
-            canvas,
-            "Register Wajah",
-            (235, 58),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            COLOR_TEXT,
-            2,
-            cv2.LINE_AA,
-        )
+        canvas = np.full((560, 720, 3), COLOR_BG, dtype=np.uint8)
+        draw_header(canvas, "Register Wajah", "Simpan data member dan wajah customer.", 720)
+        draw_round_rect(canvas, (92, 124, 628, 530), COLOR_PANEL, 18, -1, COLOR_BORDER)
+        draw_status_chip(canvas, "Form customer", (120, 132, 270, 168), COLOR_ACCENT, COLOR_ACCENT_SOFT)
         cv2.putText(
             canvas,
             status["text"],
-            (120, 122),
+            (120, 176),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.48,
             COLOR_MUTED,
@@ -714,21 +764,22 @@ def show_visual_menu():
         {
             "label": "Recognize",
             "value": "1",
-            "rect": (120, 155, 600, 215),
-            "border": COLOR_BLUE,
+            "rect": (120, 170, 600, 230),
+            "border": COLOR_BORDER,
+            "text_color": COLOR_PRIMARY,
         },
         {
             "label": "Register Wajah",
             "value": "2",
-            "rect": (120, 235, 600, 295),
-            "color": COLOR_BLUE,
-            "border": COLOR_BLUE,
+            "rect": (120, 250, 600, 310),
+            "color": COLOR_PRIMARY,
+            "border": COLOR_PRIMARY,
             "text_color": (255, 255, 255),
         },
         {
             "label": "Exit",
             "value": "0",
-            "rect": (120, 315, 600, 375),
+            "rect": (120, 330, 600, 390),
             "border": COLOR_BORDER,
             "text_color": COLOR_MUTED,
         },
@@ -746,28 +797,10 @@ def show_visual_menu():
             selected["value"] = "0"
             break
 
-        canvas = np.full((455, 720, 3), COLOR_BG, dtype=np.uint8)
-        cv2.rectangle(canvas, (0, 0), (720, 118), COLOR_BLUE_SOFT, -1)
-        cv2.putText(
-            canvas,
-            "Pingkal Face",
-            (250, 62),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.88,
-            COLOR_TEXT,
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            canvas,
-            "Kasir member recognition",
-            (238, 96),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            COLOR_BLUE,
-            1,
-            cv2.LINE_AA,
-        )
+        canvas = np.full((475, 720, 3), COLOR_BG, dtype=np.uint8)
+        draw_header(canvas, "Pingkal Face", "Kasir member recognition", 720)
+        draw_round_rect(canvas, (92, 138, 628, 414), COLOR_PANEL, 18, -1, COLOR_BORDER)
+        draw_status_chip(canvas, f"{len(KNOWN_FACES)} wajah terdaftar", (120, 426, 310, 462), COLOR_ACCENT, COLOR_ACCENT_SOFT)
 
         for button in buttons:
             draw_menu_button(canvas, button)
@@ -775,7 +808,7 @@ def show_visual_menu():
         cv2.putText(
             canvas,
             "Kamera default: index 0",
-            (270, 435),
+            (452, 449),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
             COLOR_MUTED,
