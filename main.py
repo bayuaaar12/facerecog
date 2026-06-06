@@ -31,8 +31,18 @@ COLOR_BLUE_SOFT = COLOR_PRIMARY_SOFT
 
 face_ref = cv2.CascadeClassifier(str(CASCADE_PATH))
 orb = cv2.ORB_create(nfeatures=400)
-matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
 LAST_MEMBER_NOTIFICATION = {"label": None, "sent_at": 0.0}
+
+FACE_IMAGE_SIZE = (200, 200)
+ORB_DISTANCE_LIMIT = 55
+ORB_RATIO_TEST = 0.75
+MIN_GOOD_MATCHES = 18
+MIN_MATCH_MARGIN = 8
+MIN_MATCH_RATIO = 0.18
+REGISTER_SAMPLE_COUNT = 5
+REGISTER_SAMPLE_INTERVAL = 0.35
+REGISTER_SAMPLE_TIMEOUT = 6.0
 
 
 def default_camera_index():
@@ -86,6 +96,10 @@ def slugify(value):
     return normalized.strip("_") or "customer"
 
 
+def face_label_from_path(image_path):
+    return re.sub(r"_\d+$", "", image_path.stem)
+
+
 def load_known_faces():
     known_faces = []
 
@@ -99,17 +113,20 @@ def load_known_faces():
         if image is None:
             continue
 
+        image = preprocess_face(image)
         keypoints, descriptors = orb.detectAndCompute(image, None)
         if descriptors is None or len(keypoints) < 10:
             continue
 
-        known_faces.append({"name": image_path.stem, "descriptors": descriptors})
+        known_faces.append(
+            {
+                "name": face_label_from_path(image_path),
+                "sample": image_path.stem,
+                "descriptors": descriptors,
+            }
+        )
 
     return known_faces
-
-
-KNOWN_FACES = load_known_faces()
-
 
 def face_detection(frame):
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -122,29 +139,68 @@ def face_detection(frame):
     return gray_frame, faces
 
 
+def preprocess_face(face_roi):
+    resized_face = cv2.resize(face_roi, FACE_IMAGE_SIZE)
+    return cv2.equalizeHist(resized_face)
+
+
+def count_good_matches(source_descriptors, known_descriptors):
+    if known_descriptors is None or len(known_descriptors) < 2:
+        return 0
+
+    knn_matches = matcher.knnMatch(source_descriptors, known_descriptors, k=2)
+    good_matches = [
+        first
+        for first, second in knn_matches
+        if first.distance < ORB_DISTANCE_LIMIT
+        and first.distance < ORB_RATIO_TEST * second.distance
+    ]
+    return len(good_matches)
+
+
 def recognize_face(face_roi):
-    resized_face = cv2.resize(face_roi, (200, 200))
-    _, descriptors = orb.detectAndCompute(resized_face, None)
+    normalized_face = preprocess_face(face_roi)
+    keypoints, descriptors = orb.detectAndCompute(normalized_face, None)
 
     if descriptors is None or not KNOWN_FACES:
         return "Unknown", 0
 
     best_name = "Unknown"
     best_score = 0
+    second_best_score = 0
+    descriptor_count = max(len(keypoints), 1)
+    scores_by_name = {}
 
     for known_face in KNOWN_FACES:
-        matches = matcher.match(descriptors, known_face["descriptors"])
-        good_matches = [match for match in matches if match.distance < 55]
-        score = len(good_matches)
+        score = count_good_matches(descriptors, known_face["descriptors"])
+        face_name = known_face["name"]
+        if score > scores_by_name.get(face_name, 0):
+            scores_by_name[face_name] = score
 
+    for face_name, score in scores_by_name.items():
         if score > best_score:
+            second_best_score = best_score
             best_score = score
-            best_name = known_face["name"]
+            best_name = face_name
+        elif score > second_best_score:
+            second_best_score = score
 
-    if best_score < 20:
+    match_ratio = best_score / descriptor_count
+    if (
+        best_score < MIN_GOOD_MATCHES
+        or best_score - second_best_score < MIN_MATCH_MARGIN
+        or match_ratio < MIN_MATCH_RATIO
+    ):
         return "Unknown", best_score
 
     return best_name, best_score
+
+
+KNOWN_FACES = load_known_faces()
+
+
+def known_person_count():
+    return len({known_face["name"] for known_face in KNOWN_FACES})
 
 
 def save_face_locally(face_image, face_label):
@@ -152,6 +208,101 @@ def save_face_locally(face_image, face_label):
     target_path = KNOWN_FACES_DIR / f"{face_label}.jpg"
     cv2.imwrite(str(target_path), face_image)
     return target_path
+
+
+def next_face_sample_path(face_label):
+    existing_numbers = []
+    for image_path in list_known_face_files():
+        if face_label_from_path(image_path) != face_label:
+            continue
+
+        match = re.search(r"_(\d+)$", image_path.stem)
+        existing_numbers.append(int(match.group(1)) if match else 1)
+
+    next_number = max(existing_numbers, default=0) + 1
+    return KNOWN_FACES_DIR / f"{face_label}_{next_number}.jpg"
+
+
+def save_face_sample(face_image, face_label):
+    KNOWN_FACES_DIR.mkdir(exist_ok=True)
+    target_path = next_face_sample_path(face_label)
+    cv2.imwrite(str(target_path), face_image)
+    return target_path
+
+
+def collect_face_samples(camera, initial_gray_frame, initial_faces, face_label):
+    samples = []
+    started_at = time.time()
+    last_capture_at = 0.0
+
+    selected_face = find_largest_face(initial_faces)
+    if selected_face is not None and initial_gray_frame is not None:
+        x, y, w, h = selected_face
+        samples.append(preprocess_face(initial_gray_frame[y : y + h, x : x + w]))
+        last_capture_at = time.time()
+
+    while len(samples) < REGISTER_SAMPLE_COUNT:
+        if time.time() - started_at > REGISTER_SAMPLE_TIMEOUT:
+            break
+
+        success, frame = camera.read()
+        if not success:
+            break
+
+        if time.time() - last_capture_at < REGISTER_SAMPLE_INTERVAL:
+            cv2.waitKey(1)
+            continue
+
+        frame = cv2.flip(frame, 1)
+        gray_frame, faces = face_detection(frame)
+        selected_face = find_largest_face(faces)
+        if selected_face is None:
+            continue
+
+        x, y, w, h = selected_face
+        samples.append(preprocess_face(gray_frame[y : y + h, x : x + w]))
+        last_capture_at = time.time()
+
+    saved_paths = [save_face_sample(sample, face_label) for sample in samples]
+    return samples, saved_paths
+
+
+def list_known_face_files():
+    KNOWN_FACES_DIR.mkdir(exist_ok=True)
+    image_extensions = {".jpg", ".jpeg", ".png"}
+    return [
+        image_path
+        for image_path in sorted(KNOWN_FACES_DIR.iterdir())
+        if image_path.suffix.lower() in image_extensions
+    ]
+
+
+def list_known_face_entries():
+    entries_by_label = {}
+    for image_path in list_known_face_files():
+        label = face_label_from_path(image_path)
+        entries_by_label.setdefault(label, []).append(image_path)
+
+    return [
+        {"label": label, "files": files}
+        for label, files in sorted(entries_by_label.items())
+    ]
+
+
+def display_face_label(face_label):
+    return face_label.replace("_", " ").title()
+
+
+def delete_known_face(face_entry):
+    global KNOWN_FACES
+
+    for face_path in face_entry["files"]:
+        try:
+            face_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    KNOWN_FACES = load_known_faces()
 
 
 def image_to_base64(face_image):
@@ -313,13 +464,14 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
                 print("Wajah belum terdeteksi. Coba hadapkan wajah ke kamera.")
                 continue
 
-            x, y, w, h = selected_face
-            face_roi = gray_frame[y : y + h, x : x + w]
-            face_roi = cv2.resize(face_roi, (200, 200))
+            face_samples, saved_paths = collect_face_samples(camera, gray_frame, faces, face_label)
+            if not face_samples:
+                print("Gagal mengambil sampel wajah. Coba ulangi dengan posisi wajah lebih jelas.")
+                continue
 
-            save_face_locally(face_roi, face_label)
             global KNOWN_FACES
             KNOWN_FACES = load_known_faces()
+            face_roi = face_samples[0]
 
             try:
                 response_payload = post_json(
@@ -334,9 +486,10 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
                     timeout=3,
                 )
                 print("Customer berhasil dikirim ke Laravel.")
+                print(f"{len(saved_paths)} sampel wajah tersimpan lokal.")
                 print(json.dumps(response_payload, indent=2))
             except RuntimeError as exc:
-                print("Wajah tersimpan lokal, tapi gagal kirim ke Laravel.")
+                print(f"{len(saved_paths)} sampel wajah tersimpan lokal, tapi gagal kirim ke Laravel.")
                 print(exc)
             break
 
@@ -429,7 +582,7 @@ def run_recognition(camera_index=0):
                 cv2.LINE_AA,
             )
         else:
-            known_label = f"{len(KNOWN_FACES)} wajah terdaftar"
+            known_label = f"{known_person_count()} orang / {len(KNOWN_FACES)} sampel"
             recognized_count = sum(1 for item in detections if item[4] != "Unknown")
             status_text = "Member dikenali" if recognized_count else "Scanning aktif"
             status_color = COLOR_ACCENT if recognized_count else COLOR_PRIMARY
@@ -477,8 +630,8 @@ def parse_args():
     default_index = default_camera_index()
     parser.add_argument(
         "--mode",
-        choices=["recognize", "register"],
-        help="recognize untuk deteksi wajah, register untuk simpan customer ke Laravel",
+        choices=["recognize", "register", "manage"],
+        help="recognize untuk deteksi wajah, register untuk simpan customer, manage untuk list/hapus data",
     )
     parser.add_argument("--name", help="Nama customer saat mode register")
     parser.add_argument("--phone", default="", help="Nomor telepon customer")
@@ -757,6 +910,198 @@ def show_register_form(default_discount=0):
     }
 
 
+def row_at_position(rows, x, y):
+    for index, rect in enumerate(rows):
+        x1, y1, x2, y2 = rect
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            return index
+    return None
+
+
+def show_member_data_list():
+    window_name = "Data Wajah Member"
+    action = {"value": None}
+    selected = {"index": 0}
+    scroll = {"offset": 0}
+    confirm_delete = {"value": False}
+    status = {"text": "Pilih data untuk melihat atau hapus."}
+    visible_rows = 7
+    buttons = [
+        {
+            "label": "Hapus",
+            "value": "delete",
+            "rect": (120, 555, 280, 610),
+            "color": COLOR_PRIMARY,
+            "border": COLOR_PRIMARY,
+            "text_color": (255, 255, 255),
+        },
+        {
+            "label": "Balik",
+            "value": "back",
+            "rect": (440, 555, 600, 610),
+            "border": COLOR_BORDER,
+            "text_color": COLOR_MUTED,
+        },
+    ]
+    row_rects = []
+
+    def on_mouse(event, x, y, _flags, _params):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        row_index = row_at_position(row_rects, x, y)
+        if row_index is not None:
+            selected["index"] = scroll["offset"] + row_index
+            confirm_delete["value"] = False
+            return
+
+        if confirm_delete["value"] and 300 <= x <= 425 and 555 <= y <= 610:
+            action["value"] = "confirm_delete"
+            return
+
+        action["value"] = button_at_position(buttons, x, y)
+
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(window_name, on_mouse)
+
+    while action["value"] != "back":
+        if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+            action["value"] = "back"
+            break
+
+        face_entries = list_known_face_entries()
+        if selected["index"] >= len(face_entries):
+            selected["index"] = max(0, len(face_entries) - 1)
+        if selected["index"] < scroll["offset"]:
+            scroll["offset"] = selected["index"]
+        if selected["index"] >= scroll["offset"] + visible_rows:
+            scroll["offset"] = selected["index"] - visible_rows + 1
+        scroll["offset"] = max(0, min(scroll["offset"], max(0, len(face_entries) - visible_rows)))
+
+        canvas = np.full((640, 720, 3), COLOR_BG, dtype=np.uint8)
+        draw_header(canvas, "Data Wajah", "List member yang tersimpan lokal.", 720)
+        draw_round_rect(canvas, (92, 124, 628, 625), COLOR_PANEL, 18, -1, COLOR_BORDER)
+        draw_status_chip(canvas, f"{len(face_entries)} orang", (120, 132, 250, 168), COLOR_ACCENT, COLOR_ACCENT_SOFT)
+        cv2.putText(
+            canvas,
+            status["text"],
+            (120, 188),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            COLOR_MUTED,
+            1,
+            cv2.LINE_AA,
+        )
+
+        row_rects = []
+        if not face_entries:
+            cv2.putText(
+                canvas,
+                "Belum ada wajah tersimpan.",
+                (120, 275),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                COLOR_MUTED,
+                1,
+                cv2.LINE_AA,
+            )
+        else:
+            visible_entries = face_entries[scroll["offset"] : scroll["offset"] + visible_rows]
+            for index, face_entry in enumerate(visible_entries):
+                row_y = 220 + index * 45
+                rect = (120, row_y, 600, row_y + 36)
+                row_rects.append(rect)
+                absolute_index = scroll["offset"] + index
+                is_selected = absolute_index == selected["index"]
+                row_color = COLOR_PRIMARY_SOFT if is_selected else COLOR_PANEL
+                border_color = COLOR_PRIMARY if is_selected else COLOR_BORDER
+                text_color = COLOR_PRIMARY if is_selected else COLOR_TEXT
+                draw_round_rect(canvas, rect, row_color, 10, -1, border_color)
+                cv2.putText(
+                    canvas,
+                    f"{absolute_index + 1}. {display_face_label(face_entry['label'])}",
+                    (138, row_y + 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.52,
+                    text_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    canvas,
+                    f"{len(face_entry['files'])} sampel",
+                    (435, row_y + 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    COLOR_MUTED,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        if confirm_delete["value"] and face_entries:
+            selected_name = display_face_label(face_entries[selected["index"]]["label"])
+            draw_round_rect(canvas, (300, 555, 425, 610), COLOR_ACCENT, 15, -1, COLOR_ACCENT)
+            draw_centered_text(canvas, "Yakin", (362, 582), 0.58, (255, 255, 255), 1)
+            cv2.putText(
+                canvas,
+                f"Hapus {selected_name[:18]}?",
+                (120, 535),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.46,
+                COLOR_PRIMARY,
+                1,
+                cv2.LINE_AA,
+            )
+        else:
+            draw_round_rect(canvas, (300, 555, 425, 610), COLOR_SURFACE, 15, -1, COLOR_BORDER)
+            draw_centered_text(canvas, "Pilih", (362, 582), 0.58, COLOR_MUTED, 1)
+
+        for button in buttons:
+            draw_menu_button(canvas, button)
+
+        cv2.imshow(window_name, canvas)
+        key = cv2.waitKey(30) & 0xFF
+
+        if key in (ord("q"), 27):
+            action["value"] = "back"
+            break
+        if key in (82, ord("w")) and face_entries:
+            selected["index"] = max(0, selected["index"] - 1)
+            confirm_delete["value"] = False
+            continue
+        if key in (84, ord("s")) and face_entries:
+            selected["index"] = min(len(face_entries) - 1, selected["index"] + 1)
+            confirm_delete["value"] = False
+            continue
+        if key in (ord("d"), 127, 8):
+            action["value"] = "delete"
+        if key in (13, ord("y")) and confirm_delete["value"]:
+            action["value"] = "confirm_delete"
+
+        if action["value"] == "delete":
+            action["value"] = None
+            if not face_entries:
+                status["text"] = "Tidak ada data yang bisa dihapus."
+                continue
+            confirm_delete["value"] = not confirm_delete["value"]
+            status["text"] = "Klik Yakin atau tekan Enter untuk hapus." if confirm_delete["value"] else "Hapus dibatalkan."
+            continue
+
+        if action["value"] == "confirm_delete":
+            action["value"] = None
+            if confirm_delete["value"] and face_entries:
+                deleted_name = display_face_label(face_entries[selected["index"]]["label"])
+                delete_known_face(face_entries[selected["index"]])
+                confirm_delete["value"] = False
+                status["text"] = f"{deleted_name} sudah dihapus."
+            continue
+
+    try:
+        cv2.destroyWindow(window_name)
+    except cv2.error:
+        pass
+
+
 def show_visual_menu():
     window_name = "Pingkal Face Menu"
     selected = {"value": None}
@@ -764,22 +1109,29 @@ def show_visual_menu():
         {
             "label": "Recognize",
             "value": "1",
-            "rect": (120, 170, 600, 230),
+            "rect": (120, 150, 600, 205),
             "border": COLOR_BORDER,
             "text_color": COLOR_PRIMARY,
         },
         {
             "label": "Register Wajah",
             "value": "2",
-            "rect": (120, 250, 600, 310),
+            "rect": (120, 225, 600, 280),
             "color": COLOR_PRIMARY,
             "border": COLOR_PRIMARY,
             "text_color": (255, 255, 255),
         },
         {
+            "label": "List Data",
+            "value": "3",
+            "rect": (120, 300, 600, 355),
+            "border": COLOR_BORDER,
+            "text_color": COLOR_PRIMARY,
+        },
+        {
             "label": "Exit",
             "value": "0",
-            "rect": (120, 330, 600, 390),
+            "rect": (120, 375, 600, 430),
             "border": COLOR_BORDER,
             "text_color": COLOR_MUTED,
         },
@@ -797,10 +1149,10 @@ def show_visual_menu():
             selected["value"] = "0"
             break
 
-        canvas = np.full((475, 720, 3), COLOR_BG, dtype=np.uint8)
+        canvas = np.full((515, 720, 3), COLOR_BG, dtype=np.uint8)
         draw_header(canvas, "Pingkal Face", "Kasir member recognition", 720)
-        draw_round_rect(canvas, (92, 138, 628, 414), COLOR_PANEL, 18, -1, COLOR_BORDER)
-        draw_status_chip(canvas, f"{len(KNOWN_FACES)} wajah terdaftar", (120, 426, 310, 462), COLOR_ACCENT, COLOR_ACCENT_SOFT)
+        draw_round_rect(canvas, (92, 124, 628, 450), COLOR_PANEL, 18, -1, COLOR_BORDER)
+        draw_status_chip(canvas, f"{known_person_count()} orang", (120, 466, 250, 502), COLOR_ACCENT, COLOR_ACCENT_SOFT)
 
         for button in buttons:
             draw_menu_button(canvas, button)
@@ -808,7 +1160,7 @@ def show_visual_menu():
         cv2.putText(
             canvas,
             "Kamera default: index 0",
-            (452, 449),
+            (452, 489),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
             COLOR_MUTED,
@@ -819,7 +1171,7 @@ def show_visual_menu():
         cv2.imshow(window_name, canvas)
         key = cv2.waitKey(30) & 0xFF
 
-        if key in (ord("1"), ord("2"), ord("0")):
+        if key in (ord("1"), ord("2"), ord("3"), ord("0")):
             selected["value"] = chr(key)
         elif key in (ord("q"), 27):
             selected["value"] = "0"
@@ -853,6 +1205,10 @@ def run_terminal_menu(args):
             )
             continue
 
+        if choice == "3":
+            show_member_data_list()
+            continue
+
         if choice == "0":
             print("Keluar.")
             return
@@ -871,6 +1227,10 @@ def main():
         if not args.name:
             raise RuntimeError("Mode register butuh --name.")
         register_customer(args.name, args.phone, args.discount, args.api_url, args.camera_index)
+        return
+
+    if args.mode == "manage":
+        show_member_data_list()
         return
 
     run_recognition(args.camera_index)
