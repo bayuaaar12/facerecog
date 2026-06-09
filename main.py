@@ -30,16 +30,28 @@ COLOR_BLUE = COLOR_PRIMARY
 COLOR_BLUE_SOFT = COLOR_PRIMARY_SOFT
 
 face_ref = cv2.CascadeClassifier(str(CASCADE_PATH))
-orb = cv2.ORB_create(nfeatures=400)
+orb = cv2.ORB_create(nfeatures=700)
 matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
 LAST_MEMBER_NOTIFICATION = {"label": None, "sent_at": 0.0}
 
 FACE_IMAGE_SIZE = (200, 200)
-ORB_DISTANCE_LIMIT = 55
+LOW_LIGHT_MEAN_LIMIT = 95
+LOW_LIGHT_TARGET_MEAN = 125
+LOW_LIGHT_BRIGHTNESS_BONUS = 18
+ORB_DISTANCE_LIMIT = 60
 ORB_RATIO_TEST = 0.75
 MIN_GOOD_MATCHES = 18
 MIN_MATCH_MARGIN = 8
 MIN_MATCH_RATIO = 0.18
+LOW_FEATURE_DESCRIPTOR_LIMIT = 90
+LOW_FEATURE_MIN_GOOD_MATCHES = 12
+LOW_FEATURE_MIN_MATCH_MARGIN = 5
+LOW_FEATURE_MIN_MATCH_RATIO = 0.12
+MIN_TEMPLATE_SIMILARITY = 62
+MIN_TEMPLATE_MARGIN = 3
+MIN_TEMPLATE_ORB_SUPPORT = 4
+FACE_DETECTION_ANGLES = (0, -20, 20, -35, 35)
+FACE_DETECTION_IOU_LIMIT = 0.35
 REGISTER_SAMPLE_COUNT = 5
 REGISTER_SAMPLE_INTERVAL = 0.35
 REGISTER_SAMPLE_TIMEOUT = 6.0
@@ -115,36 +127,129 @@ def load_known_faces():
 
         image = preprocess_face(image)
         keypoints, descriptors = orb.detectAndCompute(image, None)
-        if descriptors is None or len(keypoints) < 10:
-            continue
 
         known_faces.append(
             {
                 "name": face_label_from_path(image_path),
                 "sample": image_path.stem,
+                "image": image,
                 "descriptors": descriptors,
+                "keypoint_count": len(keypoints),
             }
         )
 
     return known_faces
 
+
 def face_detection(frame):
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_ref.detectMultiScale(
-        gray_frame,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(80, 80),
-    )
+    gray_frame = normalize_lighting(gray_frame)
+    faces = detect_faces_at_angles(gray_frame)
     return gray_frame, faces
+
+
+def detect_faces_at_angles(gray_frame):
+    detections = []
+    height, width = gray_frame.shape[:2]
+    center = (width / 2, height / 2)
+
+    for angle in FACE_DETECTION_ANGLES:
+        if angle == 0:
+            rotated_frame = gray_frame
+            rotation_matrix = None
+        else:
+            rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rotated_frame = cv2.warpAffine(
+                gray_frame,
+                rotation_matrix,
+                (width, height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+
+        faces = face_ref.detectMultiScale(
+            rotated_frame,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(80, 80),
+        )
+
+        for x, y, w, h in faces:
+            if rotation_matrix is None:
+                box = (x, y, w, h)
+            else:
+                box = unrotate_box((x, y, w, h), rotation_matrix, width, height)
+            detections.append(box)
+
+    return merge_overlapping_boxes(detections)
+
+
+def unrotate_box(box, rotation_matrix, width, height):
+    x, y, w, h = box
+    inverse_matrix = cv2.invertAffineTransform(rotation_matrix)
+    corners = np.array(
+        [
+            [x, y],
+            [x + w, y],
+            [x + w, y + h],
+            [x, y + h],
+        ],
+        dtype=np.float32,
+    )
+    transformed = cv2.transform(np.array([corners]), inverse_matrix)[0]
+    x1, y1 = np.floor(transformed.min(axis=0)).astype(int)
+    x2, y2 = np.ceil(transformed.max(axis=0)).astype(int)
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(0, min(width, x2))
+    y2 = max(0, min(height, y2))
+    return (x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+
+
+def box_iou(first_box, second_box):
+    first_x, first_y, first_w, first_h = first_box
+    second_x, second_y, second_w, second_h = second_box
+    left = max(first_x, second_x)
+    top = max(first_y, second_y)
+    right = min(first_x + first_w, second_x + second_w)
+    bottom = min(first_y + first_h, second_y + second_h)
+    intersection = max(0, right - left) * max(0, bottom - top)
+    first_area = first_w * first_h
+    second_area = second_w * second_h
+    union = first_area + second_area - intersection
+    return intersection / union if union else 0
+
+
+def merge_overlapping_boxes(boxes):
+    merged_boxes = []
+    for box in sorted(boxes, key=lambda item: item[2] * item[3], reverse=True):
+        if all(box_iou(box, existing_box) < FACE_DETECTION_IOU_LIMIT for existing_box in merged_boxes):
+            merged_boxes.append(box)
+    return np.array(merged_boxes, dtype=np.int32)
+
+
+def normalize_lighting(gray_image):
+    mean_light = float(np.mean(gray_image))
+    if mean_light < LOW_LIGHT_MEAN_LIMIT:
+        alpha = min(2.0, LOW_LIGHT_TARGET_MEAN / max(mean_light, 1.0))
+        gray_image = cv2.convertScaleAbs(
+            gray_image,
+            alpha=alpha,
+            beta=LOW_LIGHT_BRIGHTNESS_BONUS,
+        )
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(gray_image)
 
 
 def preprocess_face(face_roi):
     resized_face = cv2.resize(face_roi, FACE_IMAGE_SIZE)
-    return cv2.equalizeHist(resized_face)
+    return normalize_lighting(resized_face)
 
 
 def count_good_matches(source_descriptors, known_descriptors):
+    if source_descriptors is None:
+        return 0
     if known_descriptors is None or len(known_descriptors) < 2:
         return 0
 
@@ -158,42 +263,84 @@ def count_good_matches(source_descriptors, known_descriptors):
     return len(good_matches)
 
 
+def template_similarity(source_face, known_face):
+    correlation = cv2.matchTemplate(source_face, known_face, cv2.TM_CCOEFF_NORMED)[0][0]
+    abs_similarity = 1.0 - (np.mean(cv2.absdiff(source_face, known_face)) / 255.0)
+    return max(0.0, ((correlation + 1.0) / 2.0) * 100.0, abs_similarity * 100.0)
+
+
 def recognize_face(face_roi):
     normalized_face = preprocess_face(face_roi)
     keypoints, descriptors = orb.detectAndCompute(normalized_face, None)
 
-    if descriptors is None or not KNOWN_FACES:
+    if not KNOWN_FACES:
         return "Unknown", 0
 
     best_name = "Unknown"
-    best_score = 0
-    second_best_score = 0
+    best_combined_score = 0
+    best_orb_score = 0
+    best_template_score = 0
+    second_combined_score = 0
+    second_template_score = 0
     descriptor_count = max(len(keypoints), 1)
     scores_by_name = {}
 
     for known_face in KNOWN_FACES:
-        score = count_good_matches(descriptors, known_face["descriptors"])
         face_name = known_face["name"]
-        if score > scores_by_name.get(face_name, 0):
-            scores_by_name[face_name] = score
+        orb_score = count_good_matches(descriptors, known_face["descriptors"])
+        template_score = template_similarity(normalized_face, known_face["image"])
+        combined_score = orb_score + int(max(0, template_score - 50) * 0.35)
+        current_score = scores_by_name.get(
+            face_name,
+            {
+                "combined": 0,
+                "orb": 0,
+                "template": 0,
+            },
+        )
+        if combined_score > current_score["combined"]:
+            scores_by_name[face_name] = {
+                "combined": combined_score,
+                "orb": orb_score,
+                "template": template_score,
+            }
 
     for face_name, score in scores_by_name.items():
-        if score > best_score:
-            second_best_score = best_score
-            best_score = score
+        if score["combined"] > best_combined_score:
+            second_combined_score = best_combined_score
+            second_template_score = best_template_score
+            best_combined_score = score["combined"]
+            best_orb_score = score["orb"]
+            best_template_score = score["template"]
             best_name = face_name
-        elif score > second_best_score:
-            second_best_score = score
+        elif score["combined"] > second_combined_score:
+            second_combined_score = score["combined"]
+            second_template_score = score["template"]
 
-    match_ratio = best_score / descriptor_count
-    if (
-        best_score < MIN_GOOD_MATCHES
-        or best_score - second_best_score < MIN_MATCH_MARGIN
-        or match_ratio < MIN_MATCH_RATIO
-    ):
-        return "Unknown", best_score
+    match_ratio = best_orb_score / descriptor_count
+    required_good_matches = MIN_GOOD_MATCHES
+    required_match_margin = MIN_MATCH_MARGIN
+    required_match_ratio = MIN_MATCH_RATIO
+    if descriptor_count < LOW_FEATURE_DESCRIPTOR_LIMIT:
+        required_good_matches = LOW_FEATURE_MIN_GOOD_MATCHES
+        required_match_margin = LOW_FEATURE_MIN_MATCH_MARGIN
+        required_match_ratio = LOW_FEATURE_MIN_MATCH_RATIO
 
-    return best_name, best_score
+    orb_is_confident = (
+        best_orb_score >= required_good_matches
+        and best_combined_score - second_combined_score >= required_match_margin
+        and match_ratio >= required_match_ratio
+    )
+    template_is_confident = (
+        best_template_score >= MIN_TEMPLATE_SIMILARITY
+        and best_template_score - second_template_score >= MIN_TEMPLATE_MARGIN
+        and best_orb_score >= MIN_TEMPLATE_ORB_SUPPORT
+    )
+
+    if not orb_is_confident and not template_is_confident:
+        return "Unknown", best_combined_score
+
+    return best_name, best_combined_score
 
 
 KNOWN_FACES = load_known_faces()
