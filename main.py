@@ -55,6 +55,7 @@ FACE_DETECTION_IOU_LIMIT = 0.35
 REGISTER_SAMPLE_COUNT = 5
 REGISTER_SAMPLE_INTERVAL = 0.35
 REGISTER_SAMPLE_TIMEOUT = 6.0
+AUTO_REGISTER_CAPTURE_DELAY = 1.5
 
 
 def default_camera_index():
@@ -517,6 +518,7 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
     frame_count = 0
     gray_frame = None
     faces = []
+    face_seen_since = None
     action = {"value": None}
     buttons = [
         {
@@ -556,6 +558,11 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
 
         if frame_count % 3 == 1:
             gray_frame, faces = face_detection(frame)
+            if len(faces):
+                if face_seen_since is None:
+                    face_seen_since = time.time()
+            else:
+                face_seen_since = None
 
         frame = cv2.copyMakeBorder(
             frame,
@@ -574,6 +581,11 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
         for x, y, w, h in faces:
             cv2.rectangle(frame, (x, y), (x + w, y + h), COLOR_PRIMARY, 2)
 
+        auto_status = "Auto save: cari wajah"
+        if face_seen_since is not None:
+            remaining = max(0.0, AUTO_REGISTER_CAPTURE_DELAY - (time.time() - face_seen_since))
+            auto_status = f"Auto save {remaining:.1f}s"
+
         cv2.putText(
             frame,
             "Register Wajah",
@@ -582,6 +594,16 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
             0.6,
             COLOR_TEXT,
             2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            auto_status,
+            (225, 526),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.46,
+            COLOR_ACCENT if face_seen_since is not None else COLOR_MUTED,
+            1,
             cv2.LINE_AA,
         )
         cv2.putText(
@@ -604,12 +626,20 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
         if key == ord("q") or action["value"] == "back":
             break
 
-        if key == ord("c") or action["value"] == "capture":
+        auto_capture_ready = (
+            face_seen_since is not None
+            and time.time() - face_seen_since >= AUTO_REGISTER_CAPTURE_DELAY
+        )
+
+        if key == ord("c") or action["value"] == "capture" or auto_capture_ready:
             action["value"] = None
             selected_face = find_largest_face(faces)
             if selected_face is None or gray_frame is None:
                 print("Wajah belum terdeteksi. Coba hadapkan wajah ke kamera.")
                 continue
+
+            if auto_capture_ready:
+                print("Wajah terdeteksi stabil. Auto save ke lokal...")
 
             face_samples, saved_paths = collect_face_samples(camera, gray_frame, faces, face_label)
             if not face_samples:
