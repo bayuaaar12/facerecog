@@ -6,4 +6,7 @@ facedetec_env/
 server.out.log
 server.err.log
 
+known_faces/*.jpg
+known_faces/*.jpeg
+known_faces/*.png
 !known_faces/.gitkeep
