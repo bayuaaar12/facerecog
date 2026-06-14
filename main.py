@@ -55,7 +55,6 @@ FACE_DETECTION_IOU_LIMIT = 0.35
 REGISTER_SAMPLE_COUNT = 5
 REGISTER_SAMPLE_INTERVAL = 0.35
 REGISTER_SAMPLE_TIMEOUT = 6.0
-AUTO_REGISTER_CAPTURE_DELAY = 1.5
 
 
 def default_camera_index():
@@ -518,23 +517,35 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
     frame_count = 0
     gray_frame = None
     faces = []
-    face_seen_since = None
+    face_samples = []
+    saved_paths = []
+    status_message = "Ambil sampel wajah secara manual."
     action = {"value": None}
     buttons = [
         {
             "label": "Capture",
             "value": "capture",
-            "rect": (350, 505, 485, 555),
+            "rect": (315, 505, 425, 555),
             "color": COLOR_PRIMARY,
             "border": COLOR_PRIMARY,
             "text_color": (255, 255, 255),
         },
         {
+            "label": "Simpan",
+            "value": "save",
+            "rect": (438, 505, 525, 555),
+            "color": COLOR_ACCENT,
+            "border": COLOR_ACCENT,
+            "text_color": (255, 255, 255),
+            "font_scale": 0.52,
+        },
+        {
             "label": "Balik",
             "value": "back",
-            "rect": (500, 505, 620, 555),
+            "rect": (540, 505, 620, 555),
             "border": COLOR_BORDER,
             "text_color": COLOR_MUTED,
+            "font_scale": 0.52,
         },
     ]
 
@@ -558,11 +569,6 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
 
         if frame_count % 3 == 1:
             gray_frame, faces = face_detection(frame)
-            if len(faces):
-                if face_seen_since is None:
-                    face_seen_since = time.time()
-            else:
-                face_seen_since = None
 
         frame = cv2.copyMakeBorder(
             frame,
@@ -581,11 +587,6 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
         for x, y, w, h in faces:
             cv2.rectangle(frame, (x, y), (x + w, y + h), COLOR_PRIMARY, 2)
 
-        auto_status = "Auto save: cari wajah"
-        if face_seen_since is not None:
-            remaining = max(0.0, AUTO_REGISTER_CAPTURE_DELAY - (time.time() - face_seen_since))
-            auto_status = f"Auto save {remaining:.1f}s"
-
         cv2.putText(
             frame,
             "Register Wajah",
@@ -598,17 +599,17 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
         )
         cv2.putText(
             frame,
-            auto_status,
+            f"{len(saved_paths)}/{REGISTER_SAMPLE_COUNT} sampel",
             (225, 526),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.46,
-            COLOR_ACCENT if face_seen_since is not None else COLOR_MUTED,
+            COLOR_ACCENT if saved_paths else COLOR_MUTED,
             1,
             cv2.LINE_AA,
         )
         cv2.putText(
             frame,
-            f"{name} | Diskon {discount_percent}%",
+            status_message[:34],
             (225, 548),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.46,
@@ -626,24 +627,28 @@ def register_customer(name, phone, discount_percent, api_url, camera_index=0):
         if key == ord("q") or action["value"] == "back":
             break
 
-        auto_capture_ready = (
-            face_seen_since is not None
-            and time.time() - face_seen_since >= AUTO_REGISTER_CAPTURE_DELAY
-        )
-
-        if key == ord("c") or action["value"] == "capture" or auto_capture_ready:
+        if key == ord("c") or action["value"] == "capture":
             action["value"] = None
             selected_face = find_largest_face(faces)
             if selected_face is None or gray_frame is None:
                 print("Wajah belum terdeteksi. Coba hadapkan wajah ke kamera.")
+                status_message = "Wajah belum terdeteksi."
                 continue
 
-            if auto_capture_ready:
-                print("Wajah terdeteksi stabil. Auto save ke lokal...")
+            x, y, w, h = selected_face
+            face_roi = preprocess_face(gray_frame[y : y + h, x : x + w])
+            saved_path = save_face_sample(face_roi, face_label)
+            face_samples.append(face_roi)
+            saved_paths.append(saved_path)
+            status_message = f"Sampel {len(saved_paths)} tersimpan."
+            print(f"Sampel wajah tersimpan: {saved_path}")
+            continue
 
-            face_samples, saved_paths = collect_face_samples(camera, gray_frame, faces, face_label)
+        if key == ord("s") or action["value"] == "save":
+            action["value"] = None
             if not face_samples:
-                print("Gagal mengambil sampel wajah. Coba ulangi dengan posisi wajah lebih jelas.")
+                print("Belum ada sampel wajah. Capture minimal 1 sampel dulu.")
+                status_message = "Capture minimal 1 sampel dulu."
                 continue
 
             global KNOWN_FACES
